@@ -1,3 +1,7 @@
 pandas
 openpyxl
 reportlab
+fastapi
+uvicorn
+jinja2
+python-multipart

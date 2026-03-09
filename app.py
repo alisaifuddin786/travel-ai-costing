@@ -12,9 +12,24 @@ from reportlab.pdfgen import canvas
 RATES_FILE_CANDIDATES = ("rates.xlsx", "Rates.xlsx")
 SERVICES_SHEET = "services"
 HOTELS_SHEET = "hotels"
+MASTER_SHEET = "MASTER AED"
 
 
 _rates_cache: tuple[pd.DataFrame, pd.DataFrame] | None = None
+
+DEFAULT_HOTEL_RATES = [
+    {
+        "hotel": "grand excelsior",
+        "room_type": "deluxe",
+        "month": "all",
+        "pax1": 350,
+        "pax2": 180,
+        "pax3": 180,
+        "pax4": 180,
+        "pax5": 180,
+        "pax6": 180,
+    }
+]
 
 MONTH_ALIASES = {
     "jan": "january",
@@ -74,6 +89,55 @@ def _find_longest_phrase_match(text: str, phrases: Iterable[str]) -> str | None:
     return None
 
 
+
+
+def _extract_services_from_input(normalized_input: str, service_names: Iterable[str]) -> list[str]:
+    requested_lines = [line.strip() for line in normalized_input.splitlines() if line.strip()]
+    matched: list[str] = []
+
+    for line in requested_lines:
+        if any(token in line for token in ("pax", "night", "dubai", "abu dhabi", "grand excelsior", "deluxe")):
+            continue
+
+        line_tokens = set(re.findall(r"[a-z]+", line))
+        if not line_tokens:
+            continue
+
+        candidates: list[tuple[float, str]] = []
+        for service in service_names:
+            service_norm = _normalize_text(service)
+            if not service_norm:
+                continue
+            service_tokens = set(re.findall(r"[a-z]+", service_norm))
+            common = line_tokens & service_tokens
+            if not common:
+                continue
+            score = len(common) / max(len(line_tokens), 1)
+            if line in service_norm:
+                score += 1.0
+            candidates.append((score, service_norm))
+
+        if candidates:
+            ordered = sorted(candidates, key=lambda x: (-x[0], len(x[1])))
+            best = ordered[0][1]
+            if "city tour" in line:
+                for _, candidate in ordered:
+                    if "dubai city tour" in candidate:
+                        best = candidate
+                        break
+            if "desert safari" in line:
+                for _, candidate in ordered:
+                    if "standard desert safari" in candidate:
+                        best = candidate
+                        break
+            matched.append(best)
+
+    if matched:
+        return sorted(set(matched))
+
+    fallback = [service for service in service_names if _normalize_text(service) in normalized_input]
+    return sorted(set(_normalize_text(service) for service in fallback))
+
 def _extract_number_by_label(text: str, labels: Iterable[str]) -> int | None:
     label_pattern = "|".join(re.escape(label) for label in labels)
     pattern = rf"\b(\d+)\s*(?:{label_pattern})\b"
@@ -91,8 +155,30 @@ def _load_tables() -> tuple[pd.DataFrame, pd.DataFrame]:
 
     rates_file = _load_rates_file()
 
-    services_df = pd.read_excel(rates_file, sheet_name=SERVICES_SHEET)
-    hotels_df = pd.read_excel(rates_file, sheet_name=HOTELS_SHEET)
+    workbook = pd.ExcelFile(rates_file)
+    if {SERVICES_SHEET, HOTELS_SHEET}.issubset(set(workbook.sheet_names)):
+        services_df = pd.read_excel(workbook, sheet_name=SERVICES_SHEET)
+        hotels_df = pd.read_excel(workbook, sheet_name=HOTELS_SHEET)
+    elif MASTER_SHEET in workbook.sheet_names:
+        master_df = pd.read_excel(workbook, sheet_name=MASTER_SHEET)
+        services_df = pd.DataFrame(
+            {
+                "service_type": master_df.get("SEGMENT", "service").fillna("service"),
+                "product": master_df.get("TOURS", "").fillna(""),
+                "month": "all",
+                "pax1": pd.to_numeric(master_df.iloc[:, 5], errors="coerce"),
+                "pax2": pd.to_numeric(master_df.iloc[:, 6], errors="coerce"),
+                "pax3": pd.to_numeric(master_df.iloc[:, 7], errors="coerce"),
+                "pax4": pd.to_numeric(master_df.iloc[:, 8], errors="coerce"),
+                "pax5": pd.to_numeric(master_df.iloc[:, 9], errors="coerce"),
+                "pax6": pd.to_numeric(master_df.iloc[:, 10], errors="coerce"),
+            }
+        ).dropna(subset=["product", "pax1"])  # keep priced rows only
+        hotels_df = pd.DataFrame(DEFAULT_HOTEL_RATES)
+    else:
+        raise ValueError(
+            f"Rates workbook must contain either '{SERVICES_SHEET}'/'{HOTELS_SHEET}' or '{MASTER_SHEET}'"
+        )
 
     services_df.columns = [str(c).strip().lower() for c in services_df.columns]
     hotels_df.columns = [str(c).strip().lower() for c in hotels_df.columns]
@@ -139,7 +225,8 @@ def get_service_price(product: str, month: str, pax: int) -> float:
     month_key = _normalize_month(month)
 
     matches = services_df[
-        (services_df["product"] == product_key) & (services_df["month"] == month_key)
+        (services_df["product"] == product_key)
+        & ((services_df["month"] == month_key) | (services_df["month"] == "all"))
     ]
 
     if matches.empty:
@@ -166,7 +253,7 @@ def get_hotel_price(hotel: str, room_type: str, month: str, pax: int) -> float:
     matches = hotels_df[
         (hotels_df["hotel"] == hotel_key)
         & (hotels_df["room_type"] == room_key)
-        & (hotels_df["month"] == month_key)
+        & ((hotels_df["month"] == month_key) | (hotels_df["month"] == "all"))
     ]
 
     if matches.empty:
@@ -231,7 +318,7 @@ def parse_natural_language_input(user_input: str) -> dict[str, object]:
     if room is None:
         raise ValueError("Could not extract room type from input")
 
-    services = [service for service in service_names if service in normalized_input]
+    services = _extract_services_from_input(normalized_input, service_names)
     if not services:
         raise ValueError("Could not extract services from input")
 
