@@ -4,6 +4,8 @@ from pathlib import Path
 from typing import Iterable
 
 import pandas as pd
+from reportlab.lib.pagesizes import LETTER
+from reportlab.pdfgen import canvas
 
 
 RATES_FILE_CANDIDATES = ("rates.xlsx", "Rates.xlsx")
@@ -147,6 +149,55 @@ def calculate_quote(
 
     total_cost = hotel_nightly_rate * nights + services_total
     return float(total_cost)
+
+
+def generate_quotation_pdf(
+    guest_name: str,
+    destination: str,
+    hotel: str,
+    tours: str | Iterable[str],
+    transfers: str | Iterable[str],
+    total_package_cost: float,
+    output_path: str | Path = "quotation.pdf",
+) -> Path:
+    """Generate a quotation PDF with package details and return the saved file path."""
+
+    def _as_text(value: str | Iterable[str]) -> str:
+        if isinstance(value, str):
+            return value
+        return ", ".join(str(item) for item in value)
+
+    destination_text = str(destination)
+    hotel_text = str(hotel)
+    tours_text = _as_text(tours)
+    transfers_text = _as_text(transfers)
+    total_cost_text = f"{float(total_package_cost):,.2f}"
+
+    target_path = Path(output_path)
+    pdf = canvas.Canvas(str(target_path), pagesize=LETTER)
+
+    y = 740
+    line_gap = 30
+
+    pdf.setFont("Helvetica-Bold", 18)
+    pdf.drawString(72, 780, "Quotation")
+
+    pdf.setFont("Helvetica", 12)
+    rows = [
+        ("Guest Name", guest_name),
+        ("Destination", destination_text),
+        ("Hotel", hotel_text),
+        ("Tours", tours_text),
+        ("Transfers", transfers_text),
+        ("Total Package Cost", total_cost_text),
+    ]
+
+    for label, value in rows:
+        pdf.drawString(72, y, f"{label}: {value}")
+        y -= line_gap
+
+    pdf.save()
+    return target_path
 
 
 if __name__ == "__main__":
